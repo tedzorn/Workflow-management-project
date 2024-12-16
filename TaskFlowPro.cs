@@ -32,6 +32,7 @@ namespace TaskFlowPro
             services.AddControllers();
             services.AddEndpointsApiExplorer();
             services.AddSwaggerGen();
+            services.AddSignalR(); //for real-time updates
         }
 
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
@@ -49,6 +50,7 @@ namespace TaskFlowPro
             app.UseEndpoints(endpoints =>
             {
                 endpoints.MapControllers();
+                endpoints.MapHub<NotificationHub>("/notificationHub"); //signalR endpoint
             });
         }
     }
@@ -68,6 +70,8 @@ namespace TaskFlowPro
         public DateTime DueDate { get; set; }
         public PriorityLevel Priority { get; set; }
         public bool IsCompleted { get; set; }
+        public DateTime CreatedAt { get; set; } = DateTime.UtcNow; //track creation date
+        public DateTime? CompletedAt { get; set; } //track completion date
     }
 
     public enum PriorityLevel
@@ -76,6 +80,11 @@ namespace TaskFlowPro
         Medium,
         High
     }
+
+    public class NotificationHub : Microsoft.AspNetCore.SignalR.Hub
+    {
+        //hub for real-time updates
+    }
 }
 
 //controller
@@ -83,6 +92,7 @@ using Microsoft.AspNetCore.Mvc;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.SignalR;
 
 namespace TaskFlowPro.Controllers
 {
@@ -91,10 +101,12 @@ namespace TaskFlowPro.Controllers
     public class TasksController : ControllerBase
     {
         private readonly AppDbContext _context;
+        private readonly IHubContext<NotificationHub> _hubContext;
 
-        public TasksController(AppDbContext context)
+        public TasksController(AppDbContext context, IHubContext<NotificationHub> hubContext)
         {
             _context = context;
+            _hubContext = hubContext;
         }
 
         [HttpGet]
@@ -118,6 +130,8 @@ namespace TaskFlowPro.Controllers
             _context.Tasks.Add(task);
             await _context.SaveChangesAsync();
 
+            await _hubContext.Clients.All.SendAsync("TaskCreated", task); //notify clients
+
             return CreatedAtAction(nameof(GetTask), new { id = task.Id }, task);
         }
 
@@ -129,6 +143,23 @@ namespace TaskFlowPro.Controllers
             _context.Entry(task).State = EntityState.Modified;
             await _context.SaveChangesAsync();
 
+            await _hubContext.Clients.All.SendAsync("TaskUpdated", task); //notify clients
+
+            return NoContent();
+        }
+
+        [HttpPut("{id}/complete")]
+        public async Task<IActionResult> CompleteTask(int id)
+        {
+            var task = await _context.Tasks.FindAsync(id);
+            if (task == null) return NotFound();
+
+            task.IsCompleted = true;
+            task.CompletedAt = DateTime.UtcNow;
+            _context.Entry(task).State = EntityState.Modified;
+            await _context.SaveChangesAsync();
+
+            await _hubContext.Clients.All.SendAsync("TaskCompleted", task); //notify clients
             return NoContent();
         }
 
@@ -140,6 +171,8 @@ namespace TaskFlowPro.Controllers
 
             _context.Tasks.Remove(task);
             await _context.SaveChangesAsync();
+
+            await _hubContext.Clients.All.SendAsync("TaskDeleted", id); //notify clients
 
             return NoContent();
         }
